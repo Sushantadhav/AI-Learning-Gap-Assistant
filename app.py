@@ -4,12 +4,15 @@ import os
 from dotenv import load_dotenv
 import datetime
 import json
+import io
+
 from reportlab.lib.pagesizes import letter
-from reportlab.pdfgen import canvas
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet
 
 
 # ---------------------------------
-#  LOAD API KEY
+#  APP & API SETUP
 # ---------------------------------
 load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY") or st.secrets.get("GROQ_API_KEY")
@@ -20,9 +23,38 @@ if not GROQ_API_KEY:
 
 client = Groq(api_key=GROQ_API_KEY)
 
+st.set_page_config(
+    page_title="AI Learning Gap Assistant",
+    page_icon="🎓",
+    layout="centered"
+)
+# THEME — Indigo Accent (Professional Dashboard)
+st.markdown("""
+<style>
+html, body, [class*="css"] {
+    background:#0b0e17 !important;
+    color:#e8e8ea !important;
+}
+section.main > div {max-width: 950px}
+.stChatMessage, .stMarkdown, .stTextInput, .stSelectbox {
+    background:#111729 !important;
+    border-radius:16px !important;
+    padding:12px !important;
+    border:1px solid #1c2545;
+}
+.stButton>button {
+    background:#3d5afe !important;
+    color:#ffffff !important;
+    border-radius:12px;
+    border:0px;
+}
+.stButton>button:hover {background:#5e73ff !important;}
+</style>
+""", unsafe_allow_html=True)
+
 
 # ---------------------------------
-#  LOCAL SESSION STORAGE (JSON)
+#  LOCAL SESSION STORAGE
 # ---------------------------------
 DATA_FILE = "student_sessions.json"
 
@@ -44,7 +76,7 @@ def save_session(entry):
 
 
 # ---------------------------------
-#  SUBJECT PRESETS
+#  SUBJECT & BLOOM PRESETS
 # ---------------------------------
 SUBJECT_PRESETS = {
     "General": "Explain simply using relatable daily-life examples.",
@@ -53,6 +85,14 @@ SUBJECT_PRESETS = {
     "Computer Science": "Explain concept first, then small example.",
     "Economics": "Explain with real-life decision-making scenarios."
 }
+
+BLOOM_GUIDE = {
+    "Remember": "Recall, define, identify basic concepts.",
+    "Understand": "Explain meaning, interpret ideas clearly.",
+    "Apply": "Use concepts in real-world or practical examples.",
+    "Analyze": "Compare, reason, break down relationships."
+}
+
 
 SYSTEM_PROMPT = """
 You are an AI-Powered Learning Gap Assistant.
@@ -77,36 +117,42 @@ Always respond in this structure:
 for k, v in {
     "chat_history": [],
     "meta_log": [],
-    "feedback_log": [],
+    "confidence_log": [],
     "last_answer": None,
-    "session_topic": ""
+    "session_topic": "",
+    "session_active": True,
 }.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
 
 # ---------------------------------
-#  AI RESPONSE FUNCTION
+#  AI RESPONSE ENGINE
 # ---------------------------------
-def generate_response(question, subject, depth, style, mode="normal"):
+def generate_response(question, subject, bloom_level, style, mode="primary"):
 
-    refinement = {
-        "simpler": "Provide a simpler explanation than before.",
+    refinement_map = {
+        "simpler": "Explain this again in simpler scaffolded form.",
         "more_examples": "Provide more real-world examples and analogies."
-    }.get(mode, "")
+    }
+
+    refinement_text = refinement_map.get(mode, "")
 
     user_prompt = f"""
 Session Topic: {st.session_state.session_topic}
 
 Subject: {subject}
-Depth: {depth}
-Style: {style}
+Bloom Learning Level: {bloom_level}
+Explanation Style: {style}
 
-Guidance:
+Subject Guidance:
 {SUBJECT_PRESETS.get(subject, "")}
 
+Bloom Style:
+{BLOOM_GUIDE.get(bloom_level, "")}
+
 Refinement Mode:
-{refinement}
+{refinement_text}
 
 Student Question:
 {question}
@@ -115,8 +161,10 @@ Student Question:
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
     for speaker, msg in st.session_state.chat_history:
-        role = "user" if speaker == "Student" else "assistant"
-        messages.append({"role": role, "content": msg})
+        messages.append({
+            "role": "user" if speaker == "Student" else "assistant",
+            "content": msg
+        })
 
     messages.append({"role": "user", "content": user_prompt})
 
@@ -127,36 +175,81 @@ Student Question:
 
     answer = response.choices[0].message.content
 
-    st.session_state.chat_history.append(("Student", question))
-    st.session_state.chat_history.append(("AI Assistant", answer))
+    # --------------------------
+    # LABELS IN CHAT HISTORY
+    # --------------------------
+    if mode == "primary":
+        tag = "(v1 — Main Explanation)"
+    elif mode == "simpler":
+        tag = "(Refinement — Simpler Version)"
+    else:
+        tag = "(Refinement — More Examples)"
 
+    st.session_state.chat_history.append(("Student", question))
+    st.session_state.chat_history.append(("AI Assistant", f"{tag}\n\n{answer}"))
     st.session_state.last_answer = answer
 
-    entry = {
-        "timestamp": str(datetime.datetime.now()),
-        "topic": st.session_state.session_topic,
-        "subject": subject,
-        "depth": depth,
-        "style": style,
-        "question": question,
-        "response": answer
-    }
+    # --------------------------
+    # LOG — PRIMARY ENTRY
+    # --------------------------
+    if mode == "primary":
 
-    st.session_state.meta_log.append(entry)
-    save_session(entry)
+        entry = {
+            "timestamp": str(datetime.datetime.now()),
+            "topic": st.session_state.session_topic,
+            "subject": subject,
+            "bloom_level": bloom_level,
+            "style": style,
+            "question": question,
+            "response": answer,
+            "refinement_count": 0,
+            "refinements": []
+        }
+
+        st.session_state.meta_log.append(entry)
+        save_session(entry)
+
+    # --------------------------
+    # LOG — REFINEMENTS
+    # --------------------------
+    else:
+
+        if st.session_state.meta_log:
+
+            st.session_state.meta_log[-1]["refinement_count"] += 1
+
+            st.session_state.meta_log[-1]["refinements"].append({
+                "timestamp": str(datetime.datetime.now()),
+                "mode": mode,
+                "response": answer
+            })
 
     return answer
 
 
 # ---------------------------------
-#  LEARNING SUMMARY TEXT
+#  REVISION PRIORITY ENGINE
+# ---------------------------------
+def get_revision_priority(ref_count, conf_trend):
+
+    if ref_count >= 2 or "Low" in conf_trend:
+        return "HIGH ⚠ — Needs revision"
+
+    if ref_count == 1 or "Medium" in conf_trend:
+        return "MEDIUM — Review recommended"
+
+    return "LOW — Concept understood"
+
+
+# ---------------------------------
+#  LEARNING SUMMARY GENERATOR
 # ---------------------------------
 def generate_summary():
+
     if not st.session_state.meta_log:
         return "No questions asked yet."
 
-    questions = [x["question"] for x in st.session_state.meta_log]
-    subjects = {x["subject"] for x in st.session_state.meta_log}
+    conf_trend = " → ".join(st.session_state.confidence_log) or "No feedback submitted"
 
     text = f"""
 AI Learning Session Summary
@@ -164,97 +257,183 @@ AI Learning Session Summary
 Session Topic: {st.session_state.session_topic}
 Date: {datetime.datetime.now().strftime('%d-%m-%Y %H:%M')}
 
-Total Questions: {len(questions)}
-
-Subjects Covered:
-- """ + "\n- ".join(subjects) + """
-
-Questions Asked:
+Total Questions: {len(st.session_state.meta_log)}
+Confidence Trend: {conf_trend}
 """
 
-    for q in questions:
-        text += f"• {q}\n"
+    text += "\n\nQuestions & Learning Attempts:\n"
+
+    for entry in st.session_state.meta_log:
+
+        priority = get_revision_priority(
+            entry["refinement_count"],
+            st.session_state.confidence_log
+        )
+
+        text += f"""
+• Question: {entry['question']}
+  Subject: {entry['subject']}
+  Bloom Level: {entry['bloom_level']}
+
+  Revision Priority: {priority}
+
+  Answer Version 1 (Main Explanation):
+  {entry['response']}
+"""
+
+        for i, ref in enumerate(entry["refinements"], start=2):
+            label = "Simpler Explanation" if ref["mode"] == "simpler" else "More Examples"
+
+            text += f"""
+  Answer Version {i} — {label}:
+  {ref['response']}
+"""
 
     text += """
 Reflection Notes:
-• Identify confusing areas
-• Try to explain concepts yourself
-• Ask follow-up questions if needed
+• Revise HIGH-priority topics first
+• Use simpler mode when confidence is low
+• Use examples mode when concepts feel abstract
+• Attempt practice questions after revision
 """
 
     return text
 
 
 # ---------------------------------
-#  PDF EXPORT
+#  PDF EXPORT — WRAPPED TEXT
 # ---------------------------------
-def export_pdf():
+def export_pdf_buffer():
 
-    filename = "learning_summary.pdf"
-    c = canvas.Canvas(filename, pagesize=letter)
+    buffer = io.BytesIO()
 
-    lines = generate_summary().split("\n")
+    filename = (
+        f"Session_{st.session_state.session_topic or 'Learning'}_"
+        f"{datetime.datetime.now().strftime('%d-%m-%Y_%H%M')}.pdf"
+    )
 
-    y = 750
-    for line in lines:
-        c.drawString(50, y, line)
-        y -= 14
-        if y < 50:
-            c.showPage()
-            y = 750
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=letter,
+        leftMargin=40,
+        rightMargin=40,
+        topMargin=40,
+        bottomMargin=40
+    )
 
-    c.save()
-    return filename
+    styles = getSampleStyleSheet()
+    body = styles["BodyText"]
 
+    story = []
 
-# ---------------------------------
-#  UI HEADER
-# ---------------------------------
-st.title("AI Learning Gap Assistant (Student Learning Support)")
-st.caption("Concept-focused AI explanation assistant aligned with SDG-4 Quality Education")
+    for line in generate_summary().split("\n"):
+        if line.strip() == "":
+            story.append(Spacer(1, 8))
+        else:
+            story.append(Paragraph(line, body))
 
-st.divider()
+    doc.build(story)
 
-
-# ---------------------------------
-#  SESSION TOPIC
-# ---------------------------------
-st.session_state.session_topic = st.text_input(
-    "Session Topic (optional)",
-    value=st.session_state.session_topic
-)
+    buffer.seek(0)
+    return buffer, filename
 
 
 # ---------------------------------
-#  RESET SESSION
+#  UI UTIL
 # ---------------------------------
-if st.button("Start New Session"):
-    st.session_state.chat_history = []
-    st.session_state.meta_log = []
-    st.session_state.feedback_log = []
-    st.session_state.last_answer = None
-    st.success("Session cleared — start fresh.")
+def section_header(title):
+    st.markdown(
+        f"<h4 style='margin-top:18px; margin-bottom:6px'>{title}</h4>",
+        unsafe_allow_html=True
+    )
 
 
 # ---------------------------------
-#  INPUT CONTROLS
+#  HEADER
 # ---------------------------------
-subject = st.selectbox("Select Subject", ["General", "Math", "Science", "Computer Science", "Economics"])
-depth = st.selectbox("Learning Depth", ["Basic", "Intermediate", "Detailed"])
-style = st.selectbox("Explanation Style", ["Simple", "Step-by-Step", "Concept Breakdown"])
+st.title("AI Learning Gap Assistant")
+st.caption("Bloom-aware conceptual learning • Refinement support • Reflective analytics (SDG-4 aligned)")
+st.markdown("---")
 
-question = st.chat_input("Ask your question...")
+
+# ---------------------------------
+#  SESSION CONTEXT + EXIT CONTROL
+# ---------------------------------
+section_header("Session Context")
+
+c1, c2 = st.columns([3, 1])
+
+with c1:
+    st.session_state.session_topic = st.text_input(
+        "Session Topic (optional)",
+        value=st.session_state.session_topic,
+        placeholder="e.g., Fractions, Loops, Demand Elasticity"
+    )
+
+with c2:
+
+    if st.button("Start New Session", key="reset_session"):
+        st.session_state.chat_history = []
+        st.session_state.meta_log = []
+        st.session_state.confidence_log = []
+        st.session_state.last_answer = None
+        st.session_state.session_active = True
+        st.success("Session cleared — start fresh.")
+
+    if st.button("Exit Session", key="exit_session"):
+        st.session_state.session_active = False
+        st.success("Session ended — download your report below.")
+
+
+# ---------------------------------
+#  LEARNING PREFERENCE
+# ---------------------------------
+section_header("Learning Preference")
+
+p1, p2 = st.columns(2)
+
+with p1:
+    subject = st.selectbox(
+        "Subject",
+        ["General", "Math", "Science", "Computer Science", "Economics"]
+    )
+
+    bloom_level = st.selectbox(
+        "Bloom Learning Level",
+        ["Remember", "Understand", "Apply", "Analyze"]
+    )
+
+with p2:
+    style = st.selectbox(
+        "Explanation Style",
+        ["Simple", "Step-by-Step", "Concept Breakdown"]
+    )
+
+
+# ---------------------------------
+#  QUESTION INPUT (DISABLED AFTER EXIT)
+# ---------------------------------
+if st.session_state.session_active:
+    question = st.chat_input("Ask your question...")
+else:
+    question = None
 
 
 if question:
-    generate_response(question, subject, depth, style)
+    generate_response(
+        question=question,
+        subject=subject,
+        bloom_level=bloom_level,
+        style=style,
+        mode="primary"
+    )
 
 
 # ---------------------------------
-#  CHAT UI
+#  CHAT VIEW
 # ---------------------------------
 st.divider()
-st.subheader("Conversation")
+section_header("Conversation")
 
 for speaker, msg in st.session_state.chat_history:
     with st.chat_message("user" if speaker == "Student" else "assistant"):
@@ -262,56 +441,122 @@ for speaker, msg in st.session_state.chat_history:
 
 
 # ---------------------------------
-#  UNDERSTANDING FEEDBACK
+#  CONFIDENCE FEEDBACK
 # ---------------------------------
-if st.session_state.last_answer:
+if st.session_state.last_answer and st.session_state.session_active:
 
-    st.markdown("#### How well did you understand this?")
+    section_header("Confidence Check")
 
     c1, c2, c3 = st.columns(3)
 
-    if c1.button("👍 Understood"):
-        st.session_state.feedback_log.append("Understood")
-        st.success("Great — keep going!")
+    if c1.button("👍 High Confidence", key="conf_high"):
+        st.session_state.confidence_log.append("High")
+        st.success("Great — move forward!")
 
-    if c2.button("⚠️ Partial Understanding"):
-        st.session_state.feedback_log.append("Partial")
-        st.info("You may ask for a simpler explanation.")
+    if c2.button("⚠ Medium Confidence", key="conf_mid"):
+        st.session_state.confidence_log.append("Medium")
+        st.info("Consider revising once.")
 
-    if c3.button("❌ Did Not Understand"):
-        st.session_state.feedback_log.append("Not Understood")
-        st.warning("You may request simpler explanation or more examples.")
+    if c3.button("❌ Low Confidence", key="conf_low"):
+        st.session_state.confidence_log.append("Low")
+        st.warning("Try simpler or example-based explanation.")
 
 
 # ---------------------------------
-#  FOLLOW-UP SUPPORT
+#  FOLLOW-UP LEARNING SUPPORT
 # ---------------------------------
-st.markdown("#### Follow-up Support")
+if st.session_state.session_active:
 
-f1, f2 = st.columns(2)
+    section_header("Follow-Up Learning Support")
 
-if f1.button("🧩 Explain in Simpler Words"):
-    generate_response("Explain again in simpler words", subject, depth, style, "simpler")
+    f1, f2 = st.columns(2)
 
-if f2.button("📌 Give More Real-World Examples"):
-    generate_response("Give more real-world examples", subject, depth, style, "more_examples")
+    with f1:
+        if st.button("🧩 Explain in Simpler Words", key="simpler_explain"):
+            generate_response(
+                "Explain again in simpler words",
+                subject, bloom_level, style, "simpler"
+            )
+
+    with f2:
+        if st.button("📌 Give More Real-World Examples", key="more_examples"):
+            generate_response(
+                "Give more real-world examples",
+                subject, bloom_level, style, "more_examples"
+            )
+
+
+# ---------------------------------
+#  📊 LEARNING ANALYTICS DASHBOARD
+# ---------------------------------
+if st.session_state.meta_log:
+
+    st.divider()
+    section_header("Learning Analytics Dashboard")
+
+    total_questions = len(st.session_state.meta_log)
+    total_refinements = sum(q["refinement_count"] for q in st.session_state.meta_log)
+
+    avg_refinements = (
+        round(total_refinements / total_questions, 2)
+        if total_questions else 0
+    )
+
+    st.write(f"**Total Questions:** {total_questions}")
+    st.write(f"**Total Refinements:** {total_refinements}")
+    st.write(f"**Average Refinements per Question:** {avg_refinements}")
+
+    # Bloom distribution
+    bloom_counts = {}
+    for q in st.session_state.meta_log:
+        b = q["bloom_level"]
+        bloom_counts[b] = bloom_counts.get(b, 0) + 1
+
+    st.write("**Bloom Learning Distribution:**")
+    for b, c in bloom_counts.items():
+        st.write(f"- {b}: {c}")
+
+    # Confidence summary
+    if st.session_state.confidence_log:
+        st.write("**Confidence Trend:**", " → ".join(st.session_state.confidence_log))
 
 
 # ---------------------------------
 #  DOWNLOAD SUMMARY
 # ---------------------------------
 st.divider()
-st.subheader("📥 Download Learning Summary")
+section_header("Reflection-Based Learning Summary")
 
 summary_text = generate_summary()
-
-st.text_area("Summary Preview", summary_text, height=220)
+st.text_area("Summary Preview", summary_text, height=240)
 
 if st.session_state.meta_log:
-    st.download_button("Download as TXT", summary_text, file_name="learning_summary.txt")
 
-    if st.button("Download as PDF"):
-        file = export_pdf()
-        st.success(f"Saved: {file}")
+    txt_filename = (
+        f"Session_{st.session_state.session_topic or 'Learning'}_"
+        f"{datetime.datetime.now().strftime('%d-%m-%Y_%H%M')}.txt"
+    )
+
+    st.download_button(
+        "Download as TXT",
+        data=summary_text,
+        file_name=txt_filename
+    )
+
+    pdf_buffer, pdf_filename = export_pdf_buffer()
+
+    st.download_button(
+        "Download as PDF",
+        data=pdf_buffer,
+        file_name=pdf_filename,
+        mime="application/pdf"
+    )
+
+    st.download_button(
+        "Download Session Log (JSON)",
+        data=json.dumps(st.session_state.meta_log, indent=4),
+        file_name="session_log.json"
+    )
+
 else:
-    st.info("Ask at least one question to generate a summary.")
+    st.info("Ask at least one question to generate a learning summary.")
