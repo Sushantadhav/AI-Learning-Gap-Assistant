@@ -28,7 +28,7 @@ st.set_page_config(
     page_icon="🎓",
     layout="centered"
 )
-# THEME — Indigo Accent (Professional Dashboard)
+
 st.markdown("""
 <style>
 html, body, [class*="css"] {
@@ -62,11 +62,9 @@ if not os.path.exists(DATA_FILE):
     with open(DATA_FILE, "w") as f:
         json.dump([], f)
 
-
 def load_sessions():
     with open(DATA_FILE, "r") as f:
         return json.load(f)
-
 
 def save_session(entry):
     data = load_sessions()
@@ -92,7 +90,6 @@ BLOOM_GUIDE = {
     "Apply": "Use concepts in real-world or practical examples.",
     "Analyze": "Compare, reason, break down relationships."
 }
-
 
 SYSTEM_PROMPT = """
 You are an AI-Powered Learning Gap Assistant.
@@ -175,17 +172,22 @@ Student Question:
 
     answer = response.choices[0].message.content
 
-    # --------------------------
-    # LABELS IN CHAT HISTORY
-    # --------------------------
+    # Response label
     if mode == "primary":
         tag = "(v1 — Main Explanation)"
     elif mode == "simpler":
-        tag = "(Refinement — Simpler Version)"
+        tag = "(v2 — Simpler Explanation)"
     else:
-        tag = "(Refinement — More Examples)"
+        tag = "(v2 — More Real-World Examples)"
 
-    st.session_state.chat_history.append(("Student", question))
+    # --------------------------
+    # IMPORTANT FIX:
+    # Only add Student message for PRIMARY question
+    # --------------------------
+    if mode == "primary":
+        st.session_state.chat_history.append(("Student", question))
+
+    # Always add AI reply
     st.session_state.chat_history.append(("AI Assistant", f"{tag}\n\n{answer}"))
     st.session_state.last_answer = answer
 
@@ -228,7 +230,7 @@ Student Question:
 
 
 # ---------------------------------
-#  REVISION PRIORITY ENGINE
+#  REVISION PRIORITY
 # ---------------------------------
 def get_revision_priority(ref_count, conf_trend):
 
@@ -242,7 +244,7 @@ def get_revision_priority(ref_count, conf_trend):
 
 
 # ---------------------------------
-#  LEARNING SUMMARY GENERATOR
+#  SUMMARY GENERATOR
 # ---------------------------------
 def generate_summary():
 
@@ -301,7 +303,7 @@ Reflection Notes:
 
 
 # ---------------------------------
-#  PDF EXPORT — WRAPPED TEXT
+#  PDF EXPORT
 # ---------------------------------
 def export_pdf_buffer():
 
@@ -338,9 +340,6 @@ def export_pdf_buffer():
     return buffer, filename
 
 
-# ---------------------------------
-#  UI UTIL
-# ---------------------------------
 def section_header(title):
     st.markdown(
         f"<h4 style='margin-top:18px; margin-bottom:6px'>{title}</h4>",
@@ -352,12 +351,12 @@ def section_header(title):
 #  HEADER
 # ---------------------------------
 st.title("AI Learning Gap Assistant")
-st.caption("Bloom-aware conceptual learning • Refinement support • Reflective analytics (SDG-4 aligned)")
+st.caption("Bloom-aware conceptual learning • Refinement support • Reflective analytics")
 st.markdown("---")
 
 
 # ---------------------------------
-#  SESSION CONTEXT + EXIT CONTROL
+#  SESSION CONTEXT
 # ---------------------------------
 section_header("Session Context")
 
@@ -411,13 +410,12 @@ with p2:
 
 
 # ---------------------------------
-#  QUESTION INPUT (DISABLED AFTER EXIT)
+#  QUESTION INPUT
 # ---------------------------------
 if st.session_state.session_active:
     question = st.chat_input("Ask your question...")
 else:
     question = None
-
 
 if question:
     generate_response(
@@ -465,7 +463,7 @@ if st.session_state.last_answer and st.session_state.session_active:
 # ---------------------------------
 #  FOLLOW-UP LEARNING SUPPORT
 # ---------------------------------
-if st.session_state.session_active:
+if st.session_state.session_active and st.session_state.last_answer:
 
     section_header("Follow-Up Learning Support")
 
@@ -474,20 +472,20 @@ if st.session_state.session_active:
     with f1:
         if st.button("🧩 Explain in Simpler Words", key="simpler_explain"):
             generate_response(
-                "Explain again in simpler words",
+                st.session_state.last_answer,
                 subject, bloom_level, style, "simpler"
             )
 
     with f2:
         if st.button("📌 Give More Real-World Examples", key="more_examples"):
             generate_response(
-                "Give more real-world examples",
+                st.session_state.last_answer,
                 subject, bloom_level, style, "more_examples"
             )
 
 
 # ---------------------------------
-#  📊 LEARNING ANALYTICS DASHBOARD
+#  ANALYTICS DASHBOARD
 # ---------------------------------
 if st.session_state.meta_log:
 
@@ -506,7 +504,6 @@ if st.session_state.meta_log:
     st.write(f"**Total Refinements:** {total_refinements}")
     st.write(f"**Average Refinements per Question:** {avg_refinements}")
 
-    # Bloom distribution
     bloom_counts = {}
     for q in st.session_state.meta_log:
         b = q["bloom_level"]
@@ -516,13 +513,12 @@ if st.session_state.meta_log:
     for b, c in bloom_counts.items():
         st.write(f"- {b}: {c}")
 
-    # Confidence summary
     if st.session_state.confidence_log:
         st.write("**Confidence Trend:**", " → ".join(st.session_state.confidence_log))
 
 
 # ---------------------------------
-#  DOWNLOAD SUMMARY
+#  SUMMARY + DOWNLOADS
 # ---------------------------------
 st.divider()
 section_header("Reflection-Based Learning Summary")
